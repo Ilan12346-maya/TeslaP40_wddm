@@ -1,4 +1,4 @@
-# NVIDIA Tesla P40 WDDM Feature-Gate Bypass (Drivers 551.86+)
+# NVIDIA Tesla P40 WDDM Feature-Gate Bypass (Drivers 551.86)
 
 > **Research & Proof of Concept (PoC)** to enable WDDM (Windows Display Driver Model) mode on NVIDIA Tesla P40 GPUs on driver branches 551.86 and above, overcoming the Windows **Error 43** initialization barrier without losing hardware identification or display functionality.
 
