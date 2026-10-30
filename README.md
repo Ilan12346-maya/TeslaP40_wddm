@@ -109,20 +109,21 @@ Finds the correct GPU registry subkey automatically and sets `AdapterType=1`,
 `GridLicensedFeatures=7`, `EnableMsHybrid=1`, `AllowWddmOnTesla=1`, then resets the
 device so the values take effect without a full reboot.
 
-The script matches the GPU by searching for `"Tesla"` in the device description
-(registry subkey search) and by PCI vendor ID `VEN_10DE` + a `"Tesla"` match in the
-device description (for the PnP reset step), not by a hardcoded P40 device ID. This
-means it works unmodified on any NVIDIA Tesla card, not just the P40 — but also means
-it's not picky about *which* Tesla card it finds, so if multiple NVIDIA cards are
-installed and more than one matches `"Tesla"`, check the script's output (it prints
-which registry subkey and which PnP instance ID it picked) before letting it write
-anything.
+The script finds the card by matching `"Tesla P40"` specifically — in the registry
+subkey's `DriverDesc` for the registry step, and via WMI (`Win32_PnPSignedDriver`,
+filtered on device name and NVIDIA as manufacturer) for the PnP reset step — instead
+of a hardcoded instance ID. This means it works regardless of which PCIe slot the
+card is in or how Windows numbered the device this boot, without editing the script,
+but it deliberately only matches a P40. If you have other NVIDIA Tesla cards
+installed alongside it (M40, P100, etc.), they're ignored; only the P40 gets
+touched. Using WMI instead of parsing `pnputil`'s own text output also avoids a
+locale problem: `pnputil`'s field labels (e.g. `"Instance ID:"` vs. `"Instanz-ID:"`
+on German Windows) differ by display language, while WMI property names don't.
 
-If you have a GPU that doesn't show up as `"Tesla"` in its description (e.g. a Quadro
-or a card with a vendor-customized name string), or if the script picks the wrong
-device on a multi-GPU system, you'll need to adjust the match strings in
-`enable_wddm.bat` or just hardcode the registry subkey / PnP instance ID yourself.
-To find these manually:
+If the script can't find a P40 (wrong driver, device not yet installed, or a name
+string your vendor customized), or you want to adapt this for a different Tesla
+card, you'll need to adjust the match strings in `enable_wddm.bat`. To find the
+right values manually:
 
 - **Registry subkey:** `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}`,
   then check each `000x` subkey's `DriverDesc` value in Registry Editor until you find
