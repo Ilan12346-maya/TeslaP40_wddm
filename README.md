@@ -18,6 +18,13 @@ up. It reads as an internal NVIDIA override meant for their own testing/enterpri
 deployment scenarios — this project just forces that override's success path instead
 of actually satisfying the license check.
 
+**Note for anyone following an older P40-WDDM registry-bypass tutorial:** most of
+those predate 551.86 and only claim to work "up to 551.61". With the driver patch in
+this repo applied first, the same registry values those tutorials set
+(`AdapterType=1`, `GridLicensedFeatures=7`, etc.) work again on 582.99 — the patch is
+what removes the block those older guides don't account for. You don't need a
+different registry procedure, just the patched driver underneath it.
+
 ## What's patched and why
 
 Two independent changes in the kernel driver, 6 bytes total out of ~110 MB, nothing
@@ -102,6 +109,27 @@ Finds the correct GPU registry subkey automatically and sets `AdapterType=1`,
 `GridLicensedFeatures=7`, `EnableMsHybrid=1`, `AllowWddmOnTesla=1`, then resets the
 device so the values take effect without a full reboot.
 
+The script matches the GPU by searching for `"Tesla"` in the device description
+(registry subkey search) and by PCI vendor ID `VEN_10DE` + a `"Tesla"` match in the
+device description (for the PnP reset step), not by a hardcoded P40 device ID. This
+means it works unmodified on any NVIDIA Tesla card, not just the P40 — but also means
+it's not picky about *which* Tesla card it finds, so if multiple NVIDIA cards are
+installed and more than one matches `"Tesla"`, check the script's output (it prints
+which registry subkey and which PnP instance ID it picked) before letting it write
+anything.
+
+If you have a GPU that doesn't show up as `"Tesla"` in its description (e.g. a Quadro
+or a card with a vendor-customized name string), or if the script picks the wrong
+device on a multi-GPU system, you'll need to adjust the match strings in
+`enable_wddm.bat` or just hardcode the registry subkey / PnP instance ID yourself.
+To find these manually:
+
+- **Registry subkey:** `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}`,
+  then check each `000x` subkey's `DriverDesc` value in Registry Editor until you find
+  your card.
+- **PnP instance ID:** run `pnputil /enum-devices /connected` and look for your card's
+  entry (vendor `VEN_10DE` = NVIDIA); the `Instance ID` line is what you need.
+
 ### 7. Verify
 
 ```
@@ -110,6 +138,12 @@ nvidia-smi
 
 Should show `Tesla P40` (not a generic/garbled name) with `WDDM` in the
 `Driver-Model` column, not `TCC`.
+
+For a second, independent confirmation, GPU-Z (`gpuz.png`) also correctly identifies
+the card after patching — driver `582.99`, name `NVIDIA Tesla P40`, no generic/garbled
+identification:
+
+![GPU-Z showing NVIDIA Tesla P40 on driver 582.99](gpuz.png)
 
 ## Known limitations
 
