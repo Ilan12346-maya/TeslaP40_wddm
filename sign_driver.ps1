@@ -1,66 +1,107 @@
 <#
 .SYNOPSIS
-    Self-Sign patched driver files for Windows Test Mode.
-.DESCRIPTION
-    Creates or re-uses a Code-Signing Certificate 'nv_mod' and signs
-    nvlddmkm.sys and the catalog file nv_disp.cat with SHA256.
+    Creates (if needed) a self-signed code-signing certificate, trusts it, and
+    signs a patched nvlddmkm.sys plus its matching .cat file so Windows Test
+    Mode will load it.
+
 .PARAMETER DriverDir
-    Path to the 'Display.Driver' directory containing nvlddmkm.sys and nv_disp.cat.
+    Folder containing the patched nvlddmkm.sys and the driver's .cat file
+    (e.g. the extracted "Display.Driver" folder from the NVIDIA installer).
+
+.PARAMETER CertSubject
+    Common name for the self-signed certificate. Defaults to "nv_mod". Only
+    needs to be changed if you already use that name for something else.
+
 .EXAMPLE
-    .\sign_driver.ps1 -DriverDir "C:\NVIDIA\551.86\Display.Driver"
+    .\sign_driver.ps1 -DriverDir "Display.Driver"
+
+Requires: Administrator PowerShell, Windows Test Mode enabled
+(bcdedit /set testsigning on, then reboot) before the signed driver will load.
 #>
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$DriverDir
+    [Parameter(Mandatory = $true)]
+    [string]$DriverDir,
+
+    [string]$CertSubject = "nv_mod"
 )
 
-# 1. Check Administrator Privileges
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Error "Please run this PowerShell script as Administrator!"
+$ErrorActionPreference = "Stop"
+
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error "This script must be run as Administrator."
     exit 1
 }
 
-# 2. Find or Create Code Signing Certificate
-$certSubject = "CN=nv_mod"
-$cert = Get-ChildItem -Path Cert:\LocalMachine\My -CodeSigningCert | Where-Object { $_.Subject -eq $certSubject } | Select-Object -First 1
-
-if (-not $cert) {
-    Write-Host "[*] Creating new self-signed Code Signing Certificate '$certSubject'..." -ForegroundColor Cyan
-    $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $certSubject -FriendlyName "nv_mod" -CertStoreLocation "Cert:\LocalMachine\My"
-    
-    # Export and import into Trusted Root and Publishers
-    $certBytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-    $tempCertPath = "$env:TEMP\nv_mod_temp.cer"
-    [System.IO.File]::WriteAllBytes($tempCertPath, $certBytes)
-
-    Import-Certificate -FilePath $tempCertPath -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
-    Import-Certificate -FilePath $tempCertPath -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
-    Remove-Item -Force $tempCertPath
-    Write-Host "[+] Certificate successfully installed into Root and TrustedPublisher stores." -ForegroundColor Green
-} else {
-    Write-Host "[+] Re-using existing certificate: $($cert.Thumbprint)" -ForegroundColor Green
+if (-not (Test-Path $DriverDir)) {
+    Write-Error "DriverDir not found: $DriverDir"
+    exit 1
 }
 
-# 3. Files to Sign
-$filesToSign = @(
-    (Join-Path $DriverDir "nvlddmkm.sys"),
-    (Join-Path $DriverDir "nv_disp.cat")
-)
+$sysFile = Join-Path $DriverDir "nvlddmkm.sys"
+if (-not (Test-Path $sysFile)) {
+    Write-Error "nvlddmkm.sys not found in $DriverDir"
+    exit 1
+}
 
-foreach ($filePath in $filesToSign) {
-    if (Test-Path $filePath) {
-        Write-Host "[*] Signing: $filePath" -ForegroundColor Cyan
-        $res = Set-AuthenticodeSignature -FilePath $filePath -Certificate $cert -HashAlgorithm SHA256
-        if ($res.Status -eq "Valid") {
-            Write-Host "    [OK] Signature Status: Valid" -ForegroundColor Green
-        } else {
-            Write-Warning "    [!] Warning: Status is $($res.Status) - $($res.StatusMessage)"
-        }
+$catFile = Get-ChildItem -Path $DriverDir -Filter "*.cat" | Select-Object -First 1
+if (-not $catFile) {
+    Write-Warning "No .cat file found in $DriverDir — skipping catalog signing. " +
+                   "The driver package may still fail installation if Windows checks the catalog."
+}
+
+# --- 1. Find or create the signing certificate ---
+$cert = Get-ChildItem -Path Cert:\LocalMachine\My |
+    Where-Object { $_.Subject -eq "CN=$CertSubject" } |
+    Select-Object -First 1
+
+if (-not $cert) {
+    Write-Host "[+] No existing '$CertSubject' certificate found, creating one..."
+    $cert = New-SelfSignedCertificate `
+        -Type CodeSigningCert `
+        -Subject "CN=$CertSubject" `
+        -FriendlyName $CertSubject `
+        -CertStoreLocation "Cert:\LocalMachine\My" `
+        -NotAfter (Get-Date).AddYears(10)
+    Write-Host "[+] Created certificate, thumbprint: $($cert.Thumbprint)"
+} else {
+    Write-Host "[+] Reusing existing '$CertSubject' certificate, thumbprint: $($cert.Thumbprint)"
+}
+
+# --- 2. Trust it (Root + Trusted Publishers), no manual certlm.msc needed ---
+foreach ($storeName in @("Root", "TrustedPublisher")) {
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
+        $storeName, "LocalMachine")
+    $store.Open("ReadWrite")
+    if (-not ($store.Certificates | Where-Object { $_.Thumbprint -eq $cert.Thumbprint })) {
+        $store.Add($cert)
+        Write-Host "[+] Added certificate to LocalMachine\$storeName"
     } else {
-        Write-Warning "[-] File not found: $filePath"
+        Write-Host "[i] Certificate already present in LocalMachine\$storeName"
+    }
+    $store.Close()
+}
+
+# --- 3. Sign the driver ---
+Write-Host "`n[+] Signing $sysFile ..."
+$result = Set-AuthenticodeSignature -FilePath $sysFile -Certificate $cert -HashAlgorithm SHA256
+Write-Host "    Status: $($result.Status)"
+if ($result.Status -ne "Valid") {
+    Write-Error "Signing nvlddmkm.sys did not report Valid (got: $($result.Status))."
+    exit 1
+}
+
+if ($catFile) {
+    Write-Host "[+] Signing $($catFile.FullName) ..."
+    $catResult = Set-AuthenticodeSignature -FilePath $catFile.FullName -Certificate $cert -HashAlgorithm SHA256
+    Write-Host "    Status: $($catResult.Status)"
+    if ($catResult.Status -ne "Valid") {
+        Write-Error "Signing the .cat file did not report Valid (got: $($catResult.Status))."
+        exit 1
     }
 }
 
-Write-Host "`n[+] Driver signing process completed." -ForegroundColor Green
+Write-Host "`n[+] Done. Certificate thumbprint used: $($cert.Thumbprint)"
+Write-Host "    Make sure Windows Test Mode is enabled (bcdedit /set testsigning on, then reboot)"
+Write-Host "    and Secure Boot / HVCI are disabled before installing the driver."
